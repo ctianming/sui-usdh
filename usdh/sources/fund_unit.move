@@ -4,8 +4,9 @@
  */
 module usdh::fund_unit;
 
-use std::option::{Self, Option};
+use std::option::{Self, Option, some, none, is_some, extract};
 use std::string::{Self, String};
+use std::type_name::{Self, TypeName};
 use std::vector;
 use sui::bag::{Self, Bag};
 use sui::bcs;
@@ -18,16 +19,21 @@ use sui::table::{Self, Table};
 use sui::table_vec::{Self, TableVec};
 use sui::transfer;
 use sui::tx_context::{Self, TxContext};
-use sui::type_name::{Self, TypeName};
 use sui::vec_map::{Self, VecMap};
+use usdh::treasury::{Self, Treasury};
 use usdh::usdh::USDH;
 
+/// A simple bag structure to hold dynamic fields for a FundUnit.
+public struct FieldBag has key, store {
+    id: UID,
+    items: Bag,
+}
+
 /// 资金单元对象，实现可编程资金管理
-struct FundUnit has key {
+public struct FundUnit has key, store {
     id: UID,
     original_owner: address,
     current_owner: address,
-    amount: u64,
     coin_type: TypeName,
     purpose_tags: vector<String>,
     release_time: u64,
@@ -50,7 +56,7 @@ struct FundUnit has key {
 }
 
 /// 交易记录，用于审计
-struct TransactionRecord has store {
+public struct TransactionRecord has drop, store {
     timestamp: u64,
     recipient: Option<address>,
     amount: Option<u64>,
@@ -60,7 +66,7 @@ struct TransactionRecord has store {
 }
 
 /// 多签授权记录
-struct Authorization has key, store {
+public struct Authorization has key, store {
     id: UID,
     fund_unit_id: ID,
     transaction_id: u64,
@@ -74,38 +80,38 @@ struct Authorization has key, store {
 }
 
 // 资金单元事件定义
-struct FundUnitCreateEvent has copy, drop {
+public struct FundUnitCreateEvent has copy, drop {
     fund_unit_id: ID,
     creator: address,
-    amount: u64,
+    amount_deposited: u64,
     purpose_tags: vector<String>,
     release_time: u64,
     timestamp: u64,
 }
 
-struct FundUnitTransferEvent has copy, drop {
+public struct FundUnitTransferEvent has copy, drop {
     fund_unit_id: ID,
     from: address,
     to: address,
-    amount: u64,
+    amount_transferred: u64,
     purpose_tag: Option<String>,
     timestamp: u64,
 }
 
-struct FundUnitPrivateTransferEvent has copy, drop {
+public struct FundUnitPrivateTransferEvent has copy, drop {
     fund_unit_id: ID,
     transaction_digest: vector<u8>,
     timestamp: u64,
 }
 
-struct FundUnitPropertyAddEvent has copy, drop {
+public struct FundUnitPropertyAddEvent has copy, drop {
     fund_unit_id: ID,
     property_name: String,
     property_type: TypeName,
     timestamp: u64,
 }
 
-struct AuthorizationCreatedEvent has copy, drop {
+public struct AuthorizationCreatedEvent has copy, drop {
     authorization_id: ID,
     fund_unit_id: ID,
     creator: address,
@@ -114,7 +120,7 @@ struct AuthorizationCreatedEvent has copy, drop {
     timestamp: u64,
 }
 
-struct AuthorizationApprovedEvent has copy, drop {
+public struct AuthorizationApprovedEvent has copy, drop {
     authorization_id: ID,
     fund_unit_id: ID,
     approver: address,
@@ -140,10 +146,12 @@ const EAlreadyAuthorized: u64 = 14;
 const EAuthorizationExpired: u64 = 15;
 const EQuorumNotReached: u64 = 16;
 const EAlreadyComplete: u64 = 17;
+const ESharedTreasuryNotProvided: u64 = 211;
 
 /// 创建资金单元
-public entry fun create_fund_unit<T>(
-    coin: Coin<T>,
+public entry fun create_fund_unit(
+    treasury_obj: &mut Treasury,
+    coin_to_deposit: Coin<USDH>,
     purpose_tags: vector<String>,
     release_time: u64,
     transferable: bool,
@@ -151,7 +159,7 @@ public entry fun create_fund_unit<T>(
     black_list: vector<address>,
     daily_limit: u64,
     max_transfer: u64,
-    condition_metadata: vector<u8>,
+    condition_metadata: String,
     authorized_signers: vector<address>,
     quorum_threshold: u8,
     expiration_policy: u8,
@@ -159,179 +167,149 @@ public entry fun create_fund_unit<T>(
     zk_proof_required: bool,
     ctx: &mut TxContext,
 ) {
-    // 确认金额大于0
-    let amount = coin::value(&coin);
-    assert!(amount > 0, EInvalidAmount);
+    let amount_deposited = coin::value(&coin_to_deposit);
+    assert!(amount_deposited > 0, EInvalidAmount);
 
-    // 创建资金单元对象
     let sender = tx_context::sender(ctx);
+    let new_fund_unit_id_obj = object::new(ctx);
+
     let fund_unit = FundUnit {
-        id: object::new(ctx),
+        id: new_fund_unit_id_obj,
         original_owner: sender,
         current_owner: sender,
-        amount,
-        coin_type: type_name::get<T>(),
-        purpose_tags,
-        release_time,
-        transferable,
-        white_list,
-        black_list,
-        daily_limit,
-        max_transfer,
-        condition_metadata: string::utf8(condition_metadata),
+        coin_type: type_name::get<USDH>(),
+        purpose_tags: purpose_tags,
+        release_time: release_time,
+        transferable: transferable,
+        white_list: white_list,
+        black_list: black_list,
+        daily_limit: daily_limit,
+        max_transfer: max_transfer,
+        condition_metadata: condition_metadata,
         is_loan: false,
         is_repaid: false,
         last_update_time: tx_context::epoch_timestamp_ms(ctx),
-        authorized_signers,
-        quorum_threshold,
-        expiration_policy,
-        privacy_level,
-        usage_audit_trail: vector::empty(),
-        meta_fields: option::none(),
-        zk_proof_required,
+        authorized_signers: authorized_signers,
+        quorum_threshold: quorum_threshold,
+        expiration_policy: expiration_policy,
+        privacy_level: privacy_level,
+        usage_audit_trail: vector::empty<TransactionRecord>(),
+        meta_fields: none<ID>(),
+        zk_proof_required: zk_proof_required,
     };
 
-    // 创建动态字段容器
-    let dynamic_fields_container = object::new(ctx);
-    option::fill(&mut fund_unit.meta_fields, object::id(&dynamic_fields_container));
+    let fund_unit_actual_id = object::id(&fund_unit);
+    treasury::deposit_to_fund_unit(treasury_obj, coin_to_deposit, fund_unit_actual_id, ctx);
 
-    // 存储Coin到Treasury中 (实际实现应该调用Treasury模块)
-    // 这里简化处理，只是转移代币所有权
-    transfer::public_transfer(coin, sender);
-
-    // 发出资金单元创建事件
     event::emit(FundUnitCreateEvent {
-        fund_unit_id: object::id(&fund_unit),
+        fund_unit_id: fund_unit_actual_id,
         creator: sender,
-        amount,
-        purpose_tags: purpose_tags,
-        release_time,
+        amount_deposited: amount_deposited,
+        purpose_tags: copy fund_unit.purpose_tags,
+        release_time: fund_unit.release_time,
         timestamp: tx_context::epoch_timestamp_ms(ctx),
     });
 
-    // 转移资金单元所有权
-    transfer::share_object(fund_unit);
+    transfer::public_transfer(fund_unit, sender);
 }
 
 /// 从资金单元转出资金
-public entry fun transfer_from_fund_unit<T>(
+public entry fun transfer_from_fund_unit(
+    treasury_obj: &mut Treasury,
     fund_unit: &mut FundUnit,
     recipient: address,
-    amount: u64,
-    purpose_tag: vector<u8>,
+    amount_to_transfer: u64,
+    purpose_tag: Option<String>,
+    zk_proof: Option<vector<u8>>,
     ctx: &mut TxContext,
 ) {
-    // 检查资金单元当前状态
     let current_time = tx_context::epoch_timestamp_ms(ctx);
-
-    // 验证时间锁
     assert!(current_time >= fund_unit.release_time, ETimeNotReached);
 
-    // 验证金额
-    assert!(amount > 0 && amount <= fund_unit.amount, EInvalidAmount);
+    let current_balance = treasury::get_fund_unit_balance(treasury_obj, object::id(fund_unit));
+    assert!(amount_to_transfer > 0 && amount_to_transfer <= current_balance, EInvalidAmount);
 
-    // 验证每笔限额
     if (fund_unit.max_transfer > 0) {
-        assert!(amount <= fund_unit.max_transfer, EExceedsMaxTransfer);
+        assert!(amount_to_transfer <= fund_unit.max_transfer, EExceedsMaxTransfer);
     };
 
-    // 验证发起者身份
     let sender = tx_context::sender(ctx);
     assert!(sender == fund_unit.current_owner, ENotCurrentOwner);
 
-    // 验证接收者白名单
     if (!vector::is_empty(&fund_unit.white_list)) {
         assert!(vector::contains(&fund_unit.white_list, &recipient), ERecipientNotAllowed);
     };
 
-    // 验证接收者不在黑名单
     if (!vector::is_empty(&fund_unit.black_list)) {
         assert!(!vector::contains(&fund_unit.black_list, &recipient), ERecipientBlacklisted);
     };
 
-    // 验证零知识证明 (在实际实现中应该调用ZK验证器)
-    if (fund_unit.zk_proof_required) {};
-
-    // 更新资金单元状态
-    fund_unit.amount = fund_unit.amount - amount;
-
-    // 在真实实现中，这里应该从Treasury提取资金并转给接收方
-    // let coin = treasury::withdraw_from_fund_unit(treasury, object::id(fund_unit), amount, ctx);
-    // transfer::public_transfer(coin, recipient);
-
-    // 记录转账记录
-    let purpose_tag_option = if (vector::length(&purpose_tag) > 0) {
-        option::some(string::utf8(purpose_tag))
-    } else {
-        option::none()
+    if (fund_unit.zk_proof_required) {
+        assert!(option::is_some(&zk_proof), EZkProofRequired);
+        let _proof_data = option::extract(&mut zk_proof);
     };
+
+    let coin_transferred = treasury::withdraw_from_fund_unit(
+        treasury_obj,
+        object::id(fund_unit),
+        amount_to_transfer,
+        ctx,
+    );
 
     let record = TransactionRecord {
         timestamp: current_time,
-        recipient: if (fund_unit.privacy_level >= 2) {
-            option::none()
-        } else {
+        recipient: if (fund_unit.privacy_level >= 2) { option::none() } else {
             option::some(recipient)
         },
-        amount: if (fund_unit.privacy_level == 1 || fund_unit.privacy_level == 3) {
-            option::none()
-        } else {
-            option::some(amount)
-        },
-        purpose_tag: purpose_tag_option,
-        transaction_digest: tx_context::digest(ctx),
+        amount: if (fund_unit.privacy_level == 1 || fund_unit.privacy_level == 3) { option::none() }
+        else { option::some(amount_to_transfer) },
+        purpose_tag,
+        transaction_digest: *tx_context::digest(ctx),
         zk_compliance_proof: option::none(),
     };
-
     vector::push_back(&mut fund_unit.usage_audit_trail, record);
-    fund_unit.last_update_time = current_time;
 
-    // 发出转账事件
     if (fund_unit.privacy_level == 0) {
         event::emit(FundUnitTransferEvent {
             fund_unit_id: object::id(fund_unit),
             from: sender,
             to: recipient,
-            amount,
-            purpose_tag: purpose_tag_option,
+            amount_transferred: amount_to_transfer,
+            purpose_tag: copy purpose_tag,
             timestamp: current_time,
         });
     } else {
-        // 仅发布隐私保护版本的事件
         event::emit(FundUnitPrivateTransferEvent {
             fund_unit_id: object::id(fund_unit),
-            transaction_digest: tx_context::digest(ctx),
+            transaction_digest: *tx_context::digest(ctx),
             timestamp: current_time,
         });
     };
+    transfer::public_transfer(coin_transferred, recipient);
 }
 
 /// 为资金单元添加动态属性
 public entry fun add_property_to_fund_unit<T: store>(
     fund_unit: &mut FundUnit,
-    property_name: vector<u8>,
+    property_name: String,
     property_value: T,
     ctx: &mut TxContext,
 ) {
-    // 验证调用者权限
     let sender = tx_context::sender(ctx);
     assert!(
-        sender == fund_unit.original_owner || 
-            vector::contains(&fund_unit.authorized_signers, &sender),
+        sender == fund_unit.original_owner || vector::contains(&fund_unit.authorized_signers, &sender),
         EUnauthorizedModification,
     );
 
-    // 获取动态字段容器ID
-    assert!(option::is_some(&fund_unit.meta_fields), EDynamicFieldsNotInitialized);
+    if (is_none(&fund_unit.meta_fields)) {
+        abort (EDynamicFieldsNotInitialized);
+    };
 
-    // 添加动态字段
-    let property_name_str = string::utf8(property_name);
-    dynamic_field::add(&mut fund_unit.id, property_name_str, property_value);
+    dynamic_field::add(&mut fund_unit.id, property_name, property_value);
 
-    // 发出事件
     event::emit(FundUnitPropertyAddEvent {
         fund_unit_id: object::id(fund_unit),
-        property_name: string::utf8(property_name),
+        property_name: property_name,
         property_type: type_name::get<T>(),
         timestamp: tx_context::epoch_timestamp_ms(ctx),
     });
@@ -339,55 +317,50 @@ public entry fun add_property_to_fund_unit<T: store>(
 
 /// 创建多签授权请求
 public entry fun create_authorization(
-    fund_unit: &mut FundUnit,
-    recipient: address,
-    amount: u64,
-    purpose_tag: vector<u8>,
-    expiration_time: u64,
+    fund_unit: &FundUnit,
+    treasury_obj: &Treasury,
+    recipient_addr: address,
+    amount_val: u64,
+    purpose_tag_opt_bytes: vector<u8>,
+    expiration_time_ms: u64,
     ctx: &mut TxContext,
 ) {
-    // 验证调用者身份
     let sender = tx_context::sender(ctx);
     assert!(
-        sender == fund_unit.current_owner || 
-            vector::contains(&fund_unit.authorized_signers, &sender),
+        sender == fund_unit.current_owner || vector::contains(&fund_unit.authorized_signers, &sender),
         ENotCurrentOwner,
     );
+    let current_balance = treasury::get_fund_unit_balance(treasury_obj, object::id(fund_unit));
+    assert!(amount_val > 0 && amount_val <= current_balance, EInvalidAmount);
 
-    // 验证金额
-    assert!(amount > 0 && amount <= fund_unit.amount, EInvalidAmount);
-
-    // 创建授权请求
-    let purpose_tag_option = if (vector::length(&purpose_tag) > 0) {
-        option::some(string::utf8(purpose_tag))
+    let purpose_tag_opt_str = if (vector::length(&purpose_tag_opt_bytes) > 0) {
+        some(string::utf8(purpose_tag_opt_bytes))
     } else {
-        option::none()
+        none<String>()
     };
 
+    let auth_id_obj = object::new(ctx);
     let auth = Authorization {
-        id: object::new(ctx),
+        id: auth_id_obj,
         fund_unit_id: object::id(fund_unit),
         transaction_id: vector::length(&fund_unit.usage_audit_trail) + 1,
-        recipient,
-        amount,
-        purpose_tag: purpose_tag_option,
+        recipient: recipient_addr,
+        amount: amount_val,
+        purpose_tag: purpose_tag_opt_str,
         authorized_by: vector[sender],
         is_completed: false,
         created_at: tx_context::epoch_timestamp_ms(ctx),
-        expires_at: expiration_time,
+        expires_at: expiration_time_ms,
     };
 
-    // 发出授权创建事件
     event::emit(AuthorizationCreatedEvent {
         authorization_id: object::id(&auth),
         fund_unit_id: object::id(fund_unit),
         creator: sender,
-        recipient,
-        amount,
+        recipient: recipient_addr,
+        amount: amount_val,
         timestamp: tx_context::epoch_timestamp_ms(ctx),
     });
-
-    // 分享授权对象
     transfer::share_object(auth);
 }
 
@@ -395,98 +368,86 @@ public entry fun create_authorization(
 public entry fun approve_authorization(
     fund_unit: &mut FundUnit,
     auth: &mut Authorization,
-    ctx: &mut TxContext,
+    _ctx: &mut TxContext,
 ) {
-    // 验证授权是否有效
     assert!(!auth.is_completed, EAlreadyComplete);
     assert!(auth.fund_unit_id == object::id(fund_unit), EInvalidOperation);
-    assert!(tx_context::epoch_timestamp_ms(ctx) <= auth.expires_at, EAuthorizationExpired);
+    assert!(tx_context::epoch_timestamp_ms(_ctx) <= auth.expires_at, EAuthorizationExpired);
 
-    // 验证审批者身份
-    let sender = tx_context::sender(ctx);
+    let sender = tx_context::sender(_ctx);
     assert!(vector::contains(&fund_unit.authorized_signers, &sender), EUnauthorizedModification);
     assert!(!vector::contains(&auth.authorized_by, &sender), EAlreadyAuthorized);
 
-    // 添加到已授权列表
     vector::push_back(&mut auth.authorized_by, sender);
 
-    // 发出授权审批事件
     event::emit(AuthorizationApprovedEvent {
         authorization_id: object::id(auth),
         fund_unit_id: object::id(fund_unit),
         approver: sender,
-        timestamp: tx_context::epoch_timestamp_ms(ctx),
+        timestamp: tx_context::epoch_timestamp_ms(_ctx),
     });
-
-    // 检查是否达到多签阈值
-    if (vector::length(&auth.authorized_by) >= (fund_unit.quorum_threshold as u64)) {
-        // 达到阈值，执行转账
-        execute_authorized_transfer(fund_unit, auth, ctx);
-    };
 }
 
-/// 执行已授权的转账（内部函数）
-fun execute_authorized_transfer(
+/// 执行已授权的转账（可以是一个新的 entry function）
+public entry fun execute_authorized_transfer(
+    treasury_obj: &mut Treasury,
     fund_unit: &mut FundUnit,
     auth: &mut Authorization,
     ctx: &mut TxContext,
 ) {
-    // 标记授权为已完成
+    assert!(auth.is_completed == false, EAlreadyComplete);
+    assert!(auth.fund_unit_id == object::id(fund_unit), EInvalidOperation);
+    assert!(tx_context::epoch_timestamp_ms(ctx) <= auth.expires_at, EAuthorizationExpired);
+    assert!(
+        vector::length(&auth.authorized_by) >= (fund_unit.quorum_threshold as u64),
+        EQuorumNotReached,
+    );
+
     auth.is_completed = true;
 
-    // 更新资金单元状态
-    fund_unit.amount = fund_unit.amount - auth.amount;
+    let current_balance = treasury::get_fund_unit_balance(treasury_obj, object::id(fund_unit));
+    assert!(auth.amount > 0 && auth.amount <= current_balance, EInsufficientFunds);
 
-    // 在真实实现中，这里应该从Treasury提取资金并转给接收方
-    // let coin = treasury::withdraw_from_fund_unit(treasury, object::id(fund_unit), auth.amount, ctx);
-    // transfer::public_transfer(coin, auth.recipient);
+    let coin_to_transfer = treasury::withdraw_from_fund_unit(
+        treasury_obj,
+        object::id(fund_unit),
+        auth.amount,
+        ctx,
+    );
 
-    // 记录转账记录
     let record = TransactionRecord {
         timestamp: tx_context::epoch_timestamp_ms(ctx),
-        recipient: if (fund_unit.privacy_level >= 2) {
-            option::none()
-        } else {
-            option::some(auth.recipient)
+        recipient: if (fund_unit.privacy_level >= 2) { none<address>() } else {
+            some(auth.recipient)
         },
-        amount: if (fund_unit.privacy_level == 1 || fund_unit.privacy_level == 3) {
-            option::none()
-        } else {
-            option::some(auth.amount)
-        },
-        purpose_tag: auth.purpose_tag,
-        transaction_digest: tx_context::digest(ctx),
-        zk_compliance_proof: option::none(),
+        amount: if (fund_unit.privacy_level == 1 || fund_unit.privacy_level == 3) { none<u64>() }
+        else { some(auth.amount) },
+        purpose_tag: copy auth.purpose_tag,
+        transaction_digest: *tx_context::digest(ctx),
+        zk_compliance_proof: none<vector<u8>>(),
     };
-
     vector::push_back(&mut fund_unit.usage_audit_trail, record);
     fund_unit.last_update_time = tx_context::epoch_timestamp_ms(ctx);
 
-    // 发出转账事件
     if (fund_unit.privacy_level == 0) {
         event::emit(FundUnitTransferEvent {
             fund_unit_id: object::id(fund_unit),
             from: fund_unit.current_owner,
             to: auth.recipient,
-            amount: auth.amount,
-            purpose_tag: auth.purpose_tag,
+            amount_transferred: auth.amount,
+            purpose_tag: copy auth.purpose_tag,
             timestamp: tx_context::epoch_timestamp_ms(ctx),
         });
     } else {
-        // 仅发布隐私保护版本的事件
         event::emit(FundUnitPrivateTransferEvent {
             fund_unit_id: object::id(fund_unit),
-            transaction_digest: tx_context::digest(ctx),
+            transaction_digest: *tx_context::digest(ctx),
             timestamp: tx_context::epoch_timestamp_ms(ctx),
         });
     };
+    transfer::public_transfer(coin_to_transfer, auth.recipient);
 }
 
-// 用于条件付款的功能可以在真实实现中添加
-// ...
-
-// 检查日期限额的功能在真实实现中添加
-// ...
-
-// 零知识证明验证功能在真实实现中添加
-// ...
+fun is_none<T>(opt: &Option<T>): bool {
+    !option::is_some(opt)
+}

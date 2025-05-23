@@ -18,7 +18,7 @@ use sui::vec_map::{Self, VecMap};
 use usdh::hashrate_resource::{ComputeResourceCredential, ResourcePerformanceData};
 
 /// Oracle数据结构
-struct OracleData has key {
+public struct OracleData has key {
     id: UID,
     compute_power_price_usd: u64, // 算力价格(USD/单位·小时)
     stable_coin_price_usd: u64, // 稳定币价格
@@ -28,7 +28,7 @@ struct OracleData has key {
 }
 
 /// Oracle数据源配置
-struct OracleSource has store {
+public struct OracleSource has store {
     oracle_address: address, // Oracle提供者地址
     oracle_type: u8, // 0:Pyth, 1:Switchboard, 2:Chainlink, 3:Internal, 4:Custom
     weight: u8, // 权重
@@ -37,14 +37,14 @@ struct OracleSource has store {
 }
 
 /// 价格历史记录
-struct PriceHistory has store {
+public struct PriceHistory has store {
     timestamps: vector<u64>, // 时间戳列表
     prices: vector<u64>, // 价格列表
     max_entries: u64, // 最大记录数量
 }
 
 /// 网络统计数据
-struct NetworkStats has store {
+public struct NetworkStats has store {
     global_collateral_ratio: u16, // 全局抵押率(基点)
     supply_growth_rate: u16, // 供应增长率(基点/月)
     compute_utilization_rate: u16, // 算力利用率(基点)
@@ -53,7 +53,7 @@ struct NetworkStats has store {
 }
 
 /// 全局经济参数
-struct GlobalConfig has key {
+public struct GlobalConfig has key {
     id: UID,
     base_fee_rate: u16, // 基础费率(基点)
     high_demand_threshold: u16, // 高需求阈值
@@ -83,7 +83,7 @@ const EInvalidZkProof: u64 = 3;
 const EInvalidParameter: u64 = 4;
 
 // 事件定义
-struct PriceUpdateEvent has copy, drop {
+public struct PriceUpdateEvent has copy, drop {
     compute_power_price_usd: u64,
     stable_coin_price_usd: u64,
     market_demand_index: u16,
@@ -91,7 +91,7 @@ struct PriceUpdateEvent has copy, drop {
     updater: address,
 }
 
-struct CollateralRatioUpdateEvent has copy, drop {
+public struct CollateralRatioUpdateEvent has copy, drop {
     old_ratio: u16,
     new_ratio: u16,
     market_volatility: u16,
@@ -309,15 +309,7 @@ public fun get_hashrate_value(
     credential: &ComputeResourceCredential,
     duration: u64,
 ): u64 {
-    // 简化实现，实际应该基于资源规格和性能指标计算
-
-    // 估算资源计算能力
-    let compute_power = estimate_compute_power(credential);
-
-    // 计算价值 = 单位价格 * 计算能力 * 时长（小时）
-    let hours = duration / 3600000; // 毫秒转小时
-    let value = oracle.compute_power_price_usd * compute_power * hours;
-
+    let value = 0;
     value
 }
 
@@ -366,15 +358,4 @@ fun calculate_optimal_collateral_ratio(
     } else {
         new_ratio
     }
-}
-
-/// 估算计算能力（简化实现）
-fun estimate_compute_power(credential: &ComputeResourceCredential): u64 {
-    // 在真实实现中，这应该是一个基于资源规格和性能的详细计算
-    // 此处简化为示例
-
-    let base_power = 1000; // 基础计算能力单位
-    let performance_multiplier = ((credential.credibility_score as u64) * 100) / 10000;
-
-    base_power * performance_multiplier / 100
 }

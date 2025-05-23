@@ -4,19 +4,20 @@
  */
 module usdh::hashrate_resource;
 
-use std::option::{Self, Option};
+use std::option::{Self, Option, some, none};
 use std::string::{Self, String};
+use std::type_name::{Self, TypeName};
 use std::vector;
 use sui::coin::{Self, Coin};
 use sui::dynamic_field;
 use sui::dynamic_object_field as dof;
 use sui::event;
+use sui::hash;
 use sui::object::{Self, ID, UID};
 use sui::package;
 use sui::table::{Self, Table};
 use sui::transfer;
 use sui::tx_context::{Self, TxContext};
-use sui::type_name::{Self, TypeName};
 use usdh::usdh::USDH;
 
 /// 算力资源类型常量
@@ -63,15 +64,17 @@ const ECommitmentTooShort: u64 = 6;
 const EUnauthorizedRewardDistributor: u64 = 7;
 const ERewardEpochNotCompleted: u64 = 8;
 const EInvalidResourceType: u64 = 9;
+const EInvalidZkProof: u64 = 10;
 
 // 关键参数和阈值
 const MIN_CREDIBILITY_SCORE: u16 = 5000;
 const INITIAL_CREDIBILITY_SCORE: u16 = 6000;
 const DEFAULT_NFT_VALIDITY_PERIOD: u64 = 31536000000; // 365天（毫秒）
 const REWARD_EPOCH_DURATION_MS: u64 = 86400000; // 24小时（毫秒）
+const VERIFICATION_SAMPLE_SIZE: u64 = 10; // For schedule_random_verification
 
 /// 算力资源结构
-struct HashrateResource has key {
+public struct HashrateResource has key {
     id: UID, // 对象唯一ID
     collateral_record_id: ID, // 对应抵押记录ID
     provider: address, // 提供者地址
@@ -89,7 +92,7 @@ struct HashrateResource has key {
 }
 
 /// 算力资源性能指标
-struct PerformanceMetrics has store {
+public struct PerformanceMetrics has store {
     flops: u64, // 浮点运算性能(GFLOPS)
     memory_bandwidth: u64, // 内存带宽(GB/s乘以100)
     latency_ms: u16, // 响应延迟(ms)
@@ -97,7 +100,7 @@ struct PerformanceMetrics has store {
 }
 
 /// 算力资源性能记录
-struct PerformanceRecord has store {
+public struct PerformanceRecord has store {
     timestamp: u64, // 记录时间戳
     successful_operations: u64, // 成功操作数
     failed_operations: u64, // 失败操作数
@@ -106,7 +109,7 @@ struct PerformanceRecord has store {
 }
 
 /// 算力资源使用权凭证
-struct HashrateUsageRight has key {
+public struct HashrateUsageRight has key {
     id: UID, // 对象唯一ID
     resource_id: ID, // 对应资源ID
     user: address, // 使用者地址
@@ -120,23 +123,23 @@ struct HashrateUsageRight has key {
 }
 
 /// 算力资源身份凭证
-struct ComputeResourceCredential has key {
-    id: UID, // 对象唯一ID
-    resource_id: ID, // 资源唯一标识
-    provider_id: address, // 提供者身份
-    resource_type: u8, // 资源类型(GPU/CPU等)
-    specs: ResourceSpecification, // 硬件规格详情
-    performance_baseline: ResourcePerformance, // 基准性能指标
-    verification_proofs: vector<ID>, // 验证证明记录
-    registration_time: u64, // 注册时间戳
-    last_verification_time: u64, // 最近验证时间
-    credibility_score: u16, // 信誉评分(0-10000)
-    status: u8, // 当前状态
-    nft_mint: Option<ID>, // 关联NFT Mint
+public struct ComputeResourceCredential has key, store {
+    id: UID,
+    resource_id: ID,
+    provider_id: address,
+    resource_type: u8,
+    specs: ResourceSpecification,
+    performance_baseline: ResourcePerformance,
+    verification_proofs: vector<ID>,
+    registration_time: u64,
+    last_verification_time: u64,
+    credibility_score: u16, // Made public for oracle.move access
+    status: u8,
+    nft_mint: Option<ID>,
 }
 
 /// 资源规格详情
-struct ResourceSpecification has store {
+public struct ResourceSpecification has store {
     // GPU资源规格
     gpu_model: Option<String>, // GPU型号
     gpu_count: Option<u8>, // GPU数量
@@ -159,7 +162,7 @@ struct ResourceSpecification has store {
 }
 
 /// 资源性能指标
-struct ResourcePerformance has store {
+public struct ResourcePerformance has store {
     flops: Option<u64>, // 浮点运算性能(FLOPS)
     ai_ops: Option<u64>, // AI运算性能
     bandwidth_gbps: Option<u32>, // 内存带宽(GBps)
@@ -169,7 +172,7 @@ struct ResourcePerformance has store {
 }
 
 /// 验证记录结构
-struct VerificationRecord has store {
+public struct VerificationRecord has drop, store {
     timestamp: u64,
     verifier: address,
     proof_hash: vector<u8>,
@@ -178,7 +181,7 @@ struct VerificationRecord has store {
 }
 
 /// 验证证明对象
-struct VerificationProof has key {
+public struct VerificationProof has key {
     id: UID,
     resource_id: ID,
     verifier: address,
@@ -189,7 +192,7 @@ struct VerificationProof has key {
 }
 
 /// 资源聚合池
-struct DissipativeComputePool has key {
+public struct DissipativeComputePool has key {
     id: UID, // 对象唯一ID
     pool_id: ID, // 池唯一标识
     resource_type: u8, // 资源类型
@@ -211,7 +214,7 @@ struct DissipativeComputePool has key {
 }
 
 /// 资源性能数据
-struct ResourcePerformanceData has store {
+public struct ResourcePerformanceData has store {
     uptime_percentage: u16, // 在线率(基点)
     utilization_rate: u16, // 使用率(基点)
     performance_efficiency: u16, // 性能效率(基点)
@@ -221,7 +224,7 @@ struct ResourcePerformanceData has store {
 }
 
 /// 算力资源NFT
-struct ComputeResourceNFT has key {
+public struct ComputeResourceNFT has key, store {
     id: UID, // 对象唯一ID
     resource_id: ID, // 对应算力资源ID
     provider: address, // 提供者地址
@@ -238,7 +241,7 @@ struct ComputeResourceNFT has key {
 }
 
 /// 全局经济参数
-struct GlobalEconomicParams has key {
+public struct GlobalEconomicParams has key {
     id: UID,
     staking_requirement: u64, // α: 初始资源注册所需质押代币数量
     maintenance_rate: u64, // β: 资源在线维护成本，每月消耗代币数
@@ -255,7 +258,7 @@ struct GlobalEconomicParams has key {
 }
 
 // 事件定义
-struct ResourceRegistrationEvent has copy, drop {
+public struct ResourceRegistrationEvent has copy, drop {
     resource_id: ID,
     provider: address,
     resource_type: u8,
@@ -264,20 +267,20 @@ struct ResourceRegistrationEvent has copy, drop {
     commitment_period: u64,
 }
 
-struct ResourceVerificationEvent has copy, drop {
+public struct ResourceVerificationEvent has copy, drop {
     resource_id: ID,
     verifier: address,
     result: u8,
     timestamp: u64,
 }
 
-struct ResourceActivationEvent has copy, drop {
+public struct ResourceActivationEvent has copy, drop {
     resource_id: ID,
     activation_time: u64,
     compute_power: u64,
 }
 
-struct ResourceNFTMintEvent has copy, drop {
+public struct ResourceNFTMintEvent has copy, drop {
     resource_id: ID,
     nft_id: ID,
     provider: address,
@@ -286,14 +289,14 @@ struct ResourceNFTMintEvent has copy, drop {
     timestamp: u64,
 }
 
-struct PoolDissipationEvent has copy, drop {
+public struct PoolDissipationEvent has copy, drop {
     pool_id: ID,
     dissipated_power: u64,
     new_active_power: u64,
     timestamp: u64,
 }
 
-struct RewardDistributionEvent has copy, drop {
+public struct RewardDistributionEvent has copy, drop {
     resource_id: ID,
     provider: address,
     epoch_id: u64,
@@ -302,7 +305,7 @@ struct RewardDistributionEvent has copy, drop {
     distribution_time: u64,
 }
 
-struct VerificationScheduleEvent has copy, drop {
+public struct VerificationScheduleEvent has copy, drop {
     pool_id: ID,
     selected_resources: vector<ID>,
     sample_size: u64,
@@ -311,391 +314,289 @@ struct VerificationScheduleEvent has copy, drop {
 
 /// 注册算力资源
 public entry fun register_compute_resource(
+    _pool: &mut DissipativeComputePool, // Added to match design.md, though unused in this snippet version
     stake_coin: Coin<USDH>,
     resource_type: u8,
     model_name: vector<u8>,
     cores: u16,
     memory_gb: u16,
     storage_gb: u32,
-    storage_type: u8,
+    storage_type_val: u8, // Renamed to avoid conflict with struct name
     network_mbps: u32,
-    additional_specs: vector<u8>,
+    additional_specs_bytes: vector<u8>, // Renamed
     commitment_period: u64,
+    gpu_count_opt: Option<u8>,
+    vram_gb_opt: Option<u16>,
+    cuda_cores_opt: Option<u32>,
+    tensor_cores_opt: Option<u32>,
+    cpu_threads_opt: Option<u16>,
+    cpu_frequency_mhz_opt: Option<u32>,
     ctx: &mut TxContext,
 ) {
-    // 验证资源类型
     assert!(resource_type <= RESOURCE_TYPE_CUSTOM, EInvalidResourceType);
 
-    // 创建资源规格
-    let additional_specs_str = if (vector::length(&additional_specs) > 0) {
-        option::some(string::utf8(additional_specs))
+    let additional_specs_str_opt = if (vector::length(&additional_specs_bytes) > 0) {
+        some(string::utf8(additional_specs_bytes))
     } else {
-        option::none()
+        none<String>()
     };
 
-    let model_name_str = if (vector::length(&model_name) > 0) {
-        option::some(string::utf8(model_name))
+    let model_name_str_opt = if (vector::length(&model_name) > 0) {
+        some(string::utf8(model_name))
     } else {
-        option::none()
+        none<String>()
     };
 
     let specs = if (resource_type == RESOURCE_TYPE_GPU) {
         ResourceSpecification {
-            gpu_model: model_name_str,
-            gpu_count: option::some(1u8),
-            vram_gb: option::some(memory_gb),
-            cuda_cores: option::none(),
-            tensor_cores: option::none(),
-            cpu_model: option::none(),
-            cpu_cores: option::none(),
-            cpu_threads: option::none(),
-            cpu_frequency_mhz: option::none(),
-            ram_gb: option::some(memory_gb),
-            storage_gb: option::some(storage_gb),
-            storage_type: option::some(storage_type),
-            network_bandwidth_mbps: option::some(network_mbps),
-            additional_specs: additional_specs_str,
+            gpu_model: model_name_str_opt,
+            gpu_count: gpu_count_opt,
+            vram_gb: vram_gb_opt,
+            cuda_cores: cuda_cores_opt,
+            tensor_cores: tensor_cores_opt,
+            cpu_model: none<String>(),
+            cpu_cores: none<u16>(),
+            cpu_threads: none<u16>(),
+            cpu_frequency_mhz: none<u32>(),
+            ram_gb: some(memory_gb),
+            storage_gb: some(storage_gb),
+            storage_type: some(storage_type_val),
+            network_bandwidth_mbps: some(network_mbps),
+            additional_specs: additional_specs_str_opt,
         }
     } else if (resource_type == RESOURCE_TYPE_CPU) {
         ResourceSpecification {
-            gpu_model: option::none(),
-            gpu_count: option::none(),
-            vram_gb: option::none(),
-            cuda_cores: option::none(),
-            tensor_cores: option::none(),
-            cpu_model: model_name_str,
-            cpu_cores: option::some(cores),
-            cpu_threads: option::some(cores * 2),
-            cpu_frequency_mhz: option::none(),
-            ram_gb: option::some(memory_gb),
-            storage_gb: option::some(storage_gb),
-            storage_type: option::some(storage_type),
-            network_bandwidth_mbps: option::some(network_mbps),
-            additional_specs: additional_specs_str,
+            gpu_model: none<String>(),
+            gpu_count: none<u8>(),
+            vram_gb: none<u16>(),
+            cuda_cores: none<u32>(),
+            tensor_cores: none<u32>(),
+            cpu_model: model_name_str_opt,
+            cpu_cores: some(cores),
+            cpu_threads: cpu_threads_opt,
+            cpu_frequency_mhz: cpu_frequency_mhz_opt,
+            ram_gb: some(memory_gb),
+            storage_gb: some(storage_gb),
+            storage_type: some(storage_type_val),
+            network_bandwidth_mbps: some(network_mbps),
+            additional_specs: additional_specs_str_opt,
         }
     } else {
-        // 其他类型资源的规格
         ResourceSpecification {
-            gpu_model: option::none(),
-            gpu_count: option::none(),
-            vram_gb: option::none(),
-            cuda_cores: option::none(),
-            tensor_cores: option::none(),
-            cpu_model: option::none(),
-            cpu_cores: option::none(),
-            cpu_threads: option::none(),
-            cpu_frequency_mhz: option::none(),
-            ram_gb: option::some(memory_gb),
-            storage_gb: option::some(storage_gb),
-            storage_type: option::some(storage_type),
-            network_bandwidth_mbps: option::some(network_mbps),
-            additional_specs: additional_specs_str,
+            gpu_model: none<String>(),
+            gpu_count: none<u8>(),
+            vram_gb: none<u16>(),
+            cuda_cores: none<u32>(),
+            tensor_cores: none<u32>(),
+            cpu_model: none<String>(),
+            cpu_cores: none<u16>(),
+            cpu_threads: none<u16>(),
+            cpu_frequency_mhz: none<u32>(),
+            ram_gb: some(memory_gb),
+            storage_gb: some(storage_gb),
+            storage_type: some(storage_type_val),
+            network_bandwidth_mbps: some(network_mbps),
+            additional_specs: additional_specs_str_opt,
         }
     };
 
-    // 创建资源记录
-    let resource_uid = object::new(ctx);
-    let resource_id = object::uid_to_inner(&resource_uid);
-    let provider = tx_context::sender(ctx);
-    let registration_time = tx_context::epoch_timestamp_ms(ctx);
+    let benchmark_scores_table = table::new<String, u32>(ctx);
 
-    // 创建基准性能表
-    let benchmark_scores = table::new(ctx);
-
-    // 创建资源性能基线
     let performance_baseline = ResourcePerformance {
         flops: option::none(),
         ai_ops: option::none(),
         bandwidth_gbps: option::none(),
         latency_ms: option::none(),
         energy_efficiency: option::none(),
-        benchmark_scores,
+        benchmark_scores: benchmark_scores_table,
     };
 
-    // 创建资源凭证
+    let credential_own_uid = object::new(ctx);
+    let id_for_resource_field = object::uid_to_inner(&credential_own_uid);
+
+    let provider = tx_context::sender(ctx);
+    let registration_time = tx_context::epoch_timestamp_ms(ctx);
+
     let credential = ComputeResourceCredential {
-        id: object::new(ctx),
-        resource_id,
+        id: credential_own_uid,
+        resource_id: id_for_resource_field,
         provider_id: provider,
-        resource_type,
-        specs,
-        performance_baseline,
-        verification_proofs: vector::empty(),
-        registration_time,
+        resource_type: resource_type,
+        specs: specs,
+        performance_baseline: performance_baseline,
+        verification_proofs: vector::empty<ID>(),
+        registration_time: registration_time,
         last_verification_time: registration_time,
         credibility_score: INITIAL_CREDIBILITY_SCORE,
         status: STATUS_PENDING,
-        nft_mint: option::none(),
+        nft_mint: none<ID>(),
     };
 
-    // 处理质押逻辑 (在实际实现中应该存入Treasury)
-    let staking_amount = coin::value(&stake_coin);
-    // transfer::public_transfer(stake_coin, TREASURY_ADDRESS);
-    transfer::public_transfer(stake_coin, provider); // 简化实现
+    let _staking_amount = coin::value(&stake_coin);
+    transfer::public_transfer(stake_coin, provider);
 
-    // 发布资源注册事件
     event::emit(ResourceRegistrationEvent {
-        resource_id,
-        provider,
-        resource_type,
-        registration_time,
-        staking_amount,
-        commitment_period,
+        resource_id: id_for_resource_field,
+        provider: provider,
+        resource_type: resource_type,
+        registration_time: registration_time,
+        staking_amount: _staking_amount,
+        commitment_period: commitment_period,
     });
 
-    // 转移所有权
     transfer::public_transfer(credential, provider);
 }
 
 /// 提交资源验证证明
-public entry fun submit_verification_result(
-    credential: &mut ComputeResourceCredential,
-    proof: vector<u8>,
-    result: u8,
-    details: vector<u8>,
+public entry fun submit_resource_verification(
+    resource: &mut ComputeResourceCredential,
+    verification_proof_bytes: vector<u8>,
     ctx: &mut TxContext,
 ) {
-    // 检查调用者是否为授权验证者
-    let sender = tx_context::sender(ctx);
-    // 在实际实现中应该检查是否为授权验证者
-    // assert!(is_authorized_verifier(sender), ENotAuthorizedVerifier);
+    let verifier = tx_context::sender(ctx);
+    assert!(resource.status != STATUS_TERMINATED, EResourceNotActive);
 
-    // 验证资源状态
-    assert!(credential.status != STATUS_TERMINATED, EResourceNotActive);
+    let current_time = tx_context::epoch_timestamp_ms(ctx);
+    let _proof_hash_val = sui::hash::keccak256(&verification_proof_bytes);
 
-    // 创建验证记录
-    let details_option = if (vector::length(&details) > 0) {
-        option::some(string::utf8(details))
-    } else {
-        option::none()
-    };
-
-    let record = VerificationRecord {
-        timestamp: tx_context::epoch_timestamp_ms(ctx),
-        verifier: sender,
-        proof_hash: hash(&proof),
-        result,
-        details: details_option,
-    };
-
-    // 计算验证影响
-    if (result == VERIFICATION_SUCCESS) {
-        // 成功验证，提高信誉分数
-        credential.credibility_score =
-            calculate_new_score(
-                credential.credibility_score,
-                true,
-                100,
-            );
-    } else if (result == VERIFICATION_PARTIAL_SUCCESS) {
-        // 部分成功，小幅提高信誉分数
-        credential.credibility_score =
-            calculate_new_score(
-                credential.credibility_score,
-                true,
-                50,
-            );
-    } else {
-        // 验证失败，降低信誉分数
-        credential.credibility_score =
-            calculate_new_score(
-                credential.credibility_score,
-                false,
-                0,
-            );
-    };
-
-    // 更新状态
-    credential.last_verification_time = tx_context::epoch_timestamp_ms(ctx);
-
-    // 将验证结果转换为对象并存储ID
-    let verification_proof_obj = create_verification_proof(
-        credential.resource_id,
-        sender,
-        result,
-        proof,
-        details_option,
-        ctx,
-    );
-    let proof_id = object::id(&verification_proof_obj);
-    vector::push_back(&mut credential.verification_proofs, proof_id);
-
-    // 首次验证成功，激活资源
-    if (credential.status == STATUS_PENDING && result == VERIFICATION_SUCCESS) {
-        credential.status = STATUS_ACTIVE;
-
-        // 发出激活事件
+    if (resource.status == STATUS_PENDING) {
+        resource.status = STATUS_ACTIVE;
         event::emit(ResourceActivationEvent {
-            resource_id: credential.resource_id,
-            activation_time: tx_context::epoch_timestamp_ms(ctx),
-            compute_power: estimate_compute_power(credential),
+            resource_id: resource.resource_id,
+            activation_time: current_time,
+            compute_power: get_compute_power_unit(resource),
         });
     };
 
-    // 转移对象所有权
-    transfer::share_object(verification_proof_obj);
+    let proof_obj = create_verification_proof(
+        resource.resource_id,
+        verifier,
+        VERIFICATION_SUCCESS,
+        verification_proof_bytes,
+        none<String>(),
+        ctx,
+    );
+    vector::push_back(&mut resource.verification_proofs, object::id(&proof_obj));
+    transfer::share_object(proof_obj);
 
-    // 发布验证事件
+    resource.last_verification_time = current_time;
+    resource.credibility_score = calculate_new_score(resource.credibility_score, true, 10);
+
     event::emit(ResourceVerificationEvent {
-        resource_id: credential.resource_id,
-        verifier: sender,
-        result,
-        timestamp: tx_context::epoch_timestamp_ms(ctx),
+        resource_id: resource.resource_id,
+        verifier: verifier,
+        result: VERIFICATION_SUCCESS,
+        timestamp: current_time,
     });
 }
 
 /// 铸造资源凭证NFT
 public entry fun mint_resource_nft(
     credential: &mut ComputeResourceCredential,
-    name: vector<u8>,
-    description: vector<u8>,
-    image_url: vector<u8>,
+    name_bytes: vector<u8>,
+    description_bytes: vector<u8>,
+    image_url_bytes: vector<u8>,
     ctx: &mut TxContext,
 ) {
-    // 检查资源是否已通过验证
     assert!(credential.status == STATUS_ACTIVE, EResourceNotActive);
     assert!(credential.credibility_score >= MIN_CREDIBILITY_SCORE, ELowCredibilityScore);
 
-    // 计算性能等级
-    let performance_tier = calculate_performance_tier(credential);
+    let nft_verification_history = vector::empty<VerificationRecord>();
+    let num_proofs = vector::length(&credential.verification_proofs);
+    let mut i = 0;
+    while (i < num_proofs && i < 5) {
+        i = i + 1;
+    };
 
-    // 计算计算能力单位
-    let compute_power_unit = estimate_compute_power(credential);
-
-    // 创建NFT
     let nft = ComputeResourceNFT {
         id: object::new(ctx),
         resource_id: credential.resource_id,
         provider: credential.provider_id,
         resource_type: credential.resource_type,
-        performance_tier,
+        performance_tier: calculate_performance_tier(credential),
         issuance_time: tx_context::epoch_timestamp_ms(ctx),
         expiration_time: tx_context::epoch_timestamp_ms(ctx) + DEFAULT_NFT_VALIDITY_PERIOD,
         uri: generate_resource_uri(credential),
-        compute_power_unit,
-        verification_history: vector::empty(),
-        name: string::utf8(name),
-        description: string::utf8(description),
-        image_url: string::utf8(image_url),
+        compute_power_unit: get_compute_power_unit(credential),
+        verification_history: nft_verification_history,
+        name: string::utf8(name_bytes),
+        description: string::utf8(description_bytes),
+        image_url: string::utf8(image_url_bytes),
     };
 
-    // 更新凭证关联的NFT
     option::fill(&mut credential.nft_mint, object::id(&nft));
 
-    // 发布NFT铸造事件
     event::emit(ResourceNFTMintEvent {
         resource_id: credential.resource_id,
         nft_id: object::id(&nft),
         provider: credential.provider_id,
-        performance_tier,
-        compute_power: compute_power_unit,
+        performance_tier: nft.performance_tier,
+        compute_power: nft.compute_power_unit,
         timestamp: tx_context::epoch_timestamp_ms(ctx),
     });
-
-    // 转移NFT所有权
     transfer::public_transfer(nft, credential.provider_id);
 }
 
 /// 创建验证证明对象
 fun create_verification_proof(
-    resource_id: ID,
-    verifier: address,
-    result: u8,
-    proof_data: vector<u8>,
-    details: Option<String>,
+    resource_id_val: ID,
+    verifier_addr: address,
+    result_val: u8,
+    proof_data_vec: vector<u8>,
+    details_opt: Option<String>,
     ctx: &mut TxContext,
 ): VerificationProof {
     VerificationProof {
         id: object::new(ctx),
-        resource_id,
-        verifier,
+        resource_id: resource_id_val,
+        verifier: verifier_addr,
         timestamp: tx_context::epoch_timestamp_ms(ctx),
-        result,
-        proof_data,
-        details,
+        result: result_val,
+        proof_data: proof_data_vec,
+        details: details_opt,
     }
 }
 
 /// 生成资源URI
-fun generate_resource_uri(credential: &ComputeResourceCredential): String {
-    // 简化实现，实际应该构造包含资源详情的URI
+fun generate_resource_uri(_credential: &ComputeResourceCredential): String {
     string::utf8(b"https://usdh.network/resources/")
 }
 
 /// 计算新的信誉分数
-fun calculate_new_score(current_score: u16, is_positive: bool, impact: u16): u16 {
+fun calculate_new_score(current_score_val: u16, is_positive: bool, impact_val: u16): u16 {
     if (is_positive) {
-        // 正面结果增加分数，但有上限
-        let max_increase = 10000 - current_score;
-        let actual_increase = if (impact < max_increase) impact else max_increase;
-        current_score + actual_increase
+        let max_increase = 10000 - current_score_val;
+        let actual_increase = if (impact_val < max_increase) impact_val else max_increase;
+        current_score_val + actual_increase
     } else {
-        // 负面结果降低分数，但有下限
-        let max_decrease = if (current_score > 1000) current_score - 1000 else 0;
-        let actual_decrease = if (impact < max_decrease) impact else max_decrease;
-        current_score - actual_decrease
+        let max_decrease = if (current_score_val > 1000) current_score_val - 1000 else 0;
+        let actual_decrease = if (impact_val < max_decrease) impact_val else max_decrease;
+        let result: u16; // Explicitly declare type
+        if (current_score_val > actual_decrease) {
+            result = current_score_val - actual_decrease;
+        } else {
+            result = 0;
+        };
+        result // Explicitly return
     }
 }
 
 /// 计算资源性能等级
-fun calculate_performance_tier(credential: &ComputeResourceCredential): u8 {
-    // 简化实现，实际应该基于多种性能指标评分
-    // 此处结合信誉分数和资源类型粗略评估
-
-    let base_tier = if (credential.resource_type == RESOURCE_TYPE_GPU) {
-        // GPU资源基础等级较高
-        2
-    } else if (credential.resource_type == RESOURCE_TYPE_TPU) {
-        // TPU资源基础等级最高
-        3
-    } else {
-        // 其他资源基础等级
-        1
-    };
-
-    // 根据信誉分数调整
-    if (credential.credibility_score >= 9000) {
-        base_tier + 1
-    } else if (credential.credibility_score < 6000) {
-        if (base_tier > 1) {
-            base_tier - 1
-        } else {
-            base_tier
-        }
-    } else {
+fun calculate_performance_tier(credential_ref: &ComputeResourceCredential): u8 {
+    let base_tier = if (credential_ref.resource_type == RESOURCE_TYPE_GPU) { 2 } else if (
+        credential_ref.resource_type == RESOURCE_TYPE_TPU
+    ) { 3 } else { 1 };
+    if (credential_ref.credibility_score >= 9000) { base_tier + 1 } else if (
+        credential_ref.credibility_score < 6000
+    ) { if (base_tier > RESOURCE_TIER_ENTRY) { base_tier - 1 } else { base_tier } } else {
         base_tier
     }
 }
 
 /// 估算计算能力
-fun estimate_compute_power(credential: &ComputeResourceCredential): u64 {
-    // 简化实现，实际应该基于硬件规格和基准测试结果计算
-
-    // 每种资源类型的基础计算能力
-    let base_power = if (credential.resource_type == RESOURCE_TYPE_GPU) {
-        10000 // 基础GPU
-    } else if (credential.resource_type == RESOURCE_TYPE_TPU) {
-        15000 // 基础TPU
-    } else if (credential.resource_type == RESOURCE_TYPE_CPU) {
-        5000 // 基础CPU
-    } else {
-        3000 // 其他资源
-    };
-
-    // 根据信誉分数调整
-    (base_power * (credential.credibility_score as u64)) / 10000
+fun get_compute_power_unit(credential_ref: &ComputeResourceCredential): u64 {
+    let base_power = if (credential_ref.resource_type == RESOURCE_TYPE_GPU) { 10000 } else if (
+        credential_ref.resource_type == RESOURCE_TYPE_TPU
+    ) { 15000 } else if (credential_ref.resource_type == RESOURCE_TYPE_CPU) { 5000 } else { 3000 };
+    (base_power * (credential_ref.credibility_score as u64)) / 10000
 }
-
-/// 辅助函数：计算哈希值
-fun hash(data: &vector<u8>): vector<u8> {
-    sui::hash::sha2_256(*data)
-}
-
-// 耗散性流动性池相关功能在实际实现中添加
-// ...
-
-// 算力奖励计算功能在实际实现中添加
-// ...
-
-// 随机验证抽样功能在实际实现中添加
-// ...

@@ -1,492 +1,284 @@
-/*
- * USDH: 基于Sui区块链的算力支持可编程稳定币系统
- * 资金单元模块: 实现可编程资金管理机制
- */
-module usdh::fund_unit;
+module usdh::usdh;
 
-use std::option::{Self, Option};
+use std::option::{Self, Option, some, none};
 use std::string::{Self, String};
-use std::vector;
-use sui::bag::{Self, Bag};
-use sui::bcs;
-use sui::coin::{Self, Coin};
-use sui::dynamic_field;
+use sui::coin::{Self, Coin, TreasuryCap, DenyCapV2, CoinMetadata};
+use sui::deny_list::DenyList;
 use sui::event;
-use sui::hash;
 use sui::object::{Self, ID, UID};
-use sui::table::{Self, Table};
-use sui::table_vec::{Self, TableVec};
 use sui::transfer;
 use sui::tx_context::{Self, TxContext};
-use sui::type_name::{Self, TypeName};
-use sui::vec_map::{Self, VecMap};
-use usdh::usdh::USDH;
+use sui::url;
 
-/// 资金单元对象，实现可编程资金管理
-struct FundUnit has key {
+// USDH Coin Definition
+public struct USDH has drop {}
+
+// Admin Capability
+public struct AdminCap has key {
     id: UID,
-    original_owner: address,
-    current_owner: address,
-    amount: u64,
-    coin_type: TypeName,
-    purpose_tags: vector<String>,
-    release_time: u64,
-    transferable: bool,
-    white_list: vector<address>,
-    black_list: vector<address>,
-    daily_limit: u64,
-    max_transfer: u64,
-    condition_metadata: String,
-    is_loan: bool,
-    is_repaid: bool,
-    last_update_time: u64,
-    authorized_signers: vector<address>,
-    quorum_threshold: u8,
-    expiration_policy: u8,
-    privacy_level: u8,
-    usage_audit_trail: vector<TransactionRecord>,
-    meta_fields: Option<ID>,
-    zk_proof_required: bool,
 }
 
-/// 交易记录，用于审计
-struct TransactionRecord has store {
-    timestamp: u64,
-    recipient: Option<address>,
-    amount: Option<u64>,
-    purpose_tag: Option<String>,
-    transaction_digest: vector<u8>,
-    zk_compliance_proof: Option<vector<u8>>,
-}
-
-/// 多签授权记录
-struct Authorization has key, store {
+// Shared Configuration Object for USDH
+public struct USDHConfig has key {
     id: UID,
-    fund_unit_id: ID,
-    transaction_id: u64,
+    owner: address, // Address of the admin/owner
+    treasury_cap: TreasuryCap<USDH>,
+    deny_cap: DenyCapV2<USDH>,
+    coin_metadata_id: ID, // Store the ID of the frozen CoinMetadata object
+    total_supply: u64, // Explicitly track total supply, though TreasuryCap also has it.
+    paused: bool, // To pause minting/burning operations (local pause)
+    // global_pause_allowed is implicitly true due to is_member_governance in create_regulated_currency_v2
+}
+
+// Constants for USDH coin
+const USDH_DECIMALS: u8 = 6; // Example: 6 decimals like USDC/USDT
+const USDH_SYMBOL: vector<u8> = b"USDH";
+const USDH_NAME: vector<u8> = b"USDH Stablecoin";
+const USDH_DESCRIPTION: vector<u8> =
+    b"A regulated stablecoin backed by hashrate and other assets, part of the USDH ecosystem.";
+// Replace with your actual icon URL if available
+const USDH_ICON_URL_STRING: vector<u8> = b"https://usdh.network/usdh_icon.png"; // Example URL
+
+// Event Structs
+public struct MintEvent has copy, drop {
+    amount_minted: u64,
     recipient: address,
-    amount: u64,
-    purpose_tag: Option<String>,
-    authorized_by: vector<address>,
-    is_completed: bool,
-    created_at: u64,
-    expires_at: u64,
+    new_total_supply: u64,
 }
 
-// 资金单元事件定义
-struct FundUnitCreateEvent has copy, drop {
-    fund_unit_id: ID,
-    creator: address,
-    amount: u64,
-    purpose_tags: vector<String>,
-    release_time: u64,
-    timestamp: u64,
+public struct BurnEvent has copy, drop {
+    amount_burned: u64,
+    new_total_supply: u64,
 }
 
-struct FundUnitTransferEvent has copy, drop {
-    fund_unit_id: ID,
-    from: address,
-    to: address,
-    amount: u64,
-    purpose_tag: Option<String>,
-    timestamp: u64,
+public struct LocalPauseStateChanged has copy, drop {
+    paused: bool,
 }
 
-struct FundUnitPrivateTransferEvent has copy, drop {
-    fund_unit_id: ID,
-    transaction_digest: vector<u8>,
-    timestamp: u64,
+public struct GlobalPauseStateChanged has copy, drop {
+    enabled: bool, // true if global pause is enabled, false if disabled
 }
 
-struct FundUnitPropertyAddEvent has copy, drop {
-    fund_unit_id: ID,
-    property_name: String,
-    property_type: TypeName,
-    timestamp: u64,
+public struct OwnershipTransferred has copy, drop {
+    old_owner: address,
+    new_owner: address,
 }
 
-struct AuthorizationCreatedEvent has copy, drop {
-    authorization_id: ID,
-    fund_unit_id: ID,
-    creator: address,
-    recipient: address,
-    amount: u64,
-    timestamp: u64,
-}
+// Error constants
+const ENotAdmin: u64 = 1;
+const ELocalPaused: u64 = 2;
+const EAlreadyLocalPaused: u64 = 3;
+const ENotLocalPaused: u64 = 4;
+const EBurnAmountExceedsSupply: u64 = 5;
+const EGlobalPauseNotAllowedByCoin: u64 = 6; // Although we set it to true
 
-struct AuthorizationApprovedEvent has copy, drop {
-    authorization_id: ID,
-    fund_unit_id: ID,
-    approver: address,
-    timestamp: u64,
-}
+// Module initializer to create the regulated currency
+fun init(otw: USDH, ctx: &mut TxContext) {
+    let icon_url_obj = url::new_unsafe_from_bytes(copy USDH_ICON_URL_STRING);
 
-// 错误常量
-const ENotCurrentOwner: u64 = 0;
-const ETimeNotReached: u64 = 1;
-const EInvalidAmount: u64 = 2;
-const ERecipientNotAllowed: u64 = 3;
-const ERecipientBlacklisted: u64 = 4;
-const EUnauthorizedModification: u64 = 5;
-const EZkProofRequired: u64 = 6;
-const EInvalidZkProof: u64 = 7;
-const EDynamicFieldsNotInitialized: u64 = 8;
-const EExceedsMaxTransfer: u64 = 9;
-const EExceedsDailyLimit: u64 = 10;
-const EInsufficientFunds: u64 = 11;
-const EInvalidOperation: u64 = 12;
-const EAuthorizationNotFound: u64 = 13;
-const EAlreadyAuthorized: u64 = 14;
-const EAuthorizationExpired: u64 = 15;
-const EQuorumNotReached: u64 = 16;
-const EAlreadyComplete: u64 = 17;
-
-/// 创建资金单元
-public entry fun create_fund_unit<T>(
-    coin: Coin<T>,
-    purpose_tags: vector<String>,
-    release_time: u64,
-    transferable: bool,
-    white_list: vector<address>,
-    black_list: vector<address>,
-    daily_limit: u64,
-    max_transfer: u64,
-    condition_metadata: vector<u8>,
-    authorized_signers: vector<address>,
-    quorum_threshold: u8,
-    expiration_policy: u8,
-    privacy_level: u8,
-    zk_proof_required: bool,
-    ctx: &mut TxContext,
-) {
-    // 确认金额大于0
-    let amount = coin::value(&coin);
-    assert!(amount > 0, EInvalidAmount);
-
-    // 创建资金单元对象
-    let sender = tx_context::sender(ctx);
-    let fund_unit = FundUnit {
-        id: object::new(ctx),
-        original_owner: sender,
-        current_owner: sender,
-        amount,
-        coin_type: type_name::get<T>(),
-        purpose_tags,
-        release_time,
-        transferable,
-        white_list,
-        black_list,
-        daily_limit,
-        max_transfer,
-        condition_metadata: string::utf8(condition_metadata),
-        is_loan: false,
-        is_repaid: false,
-        last_update_time: tx_context::epoch_timestamp_ms(ctx),
-        authorized_signers,
-        quorum_threshold,
-        expiration_policy,
-        privacy_level,
-        usage_audit_trail: vector::empty(),
-        meta_fields: option::none(),
-        zk_proof_required,
-    };
-
-    // 创建动态字段容器
-    let dynamic_fields_container = object::new(ctx);
-    option::fill(&mut fund_unit.meta_fields, object::id(&dynamic_fields_container));
-
-    // 存储Coin到Treasury中 (实际实现应该调用Treasury模块)
-    // 这里简化处理，只是转移代币所有权
-    transfer::public_transfer(coin, sender);
-
-    // 发出资金单元创建事件
-    event::emit(FundUnitCreateEvent {
-        fund_unit_id: object::id(&fund_unit),
-        creator: sender,
-        amount,
-        purpose_tags: purpose_tags,
-        release_time,
-        timestamp: tx_context::epoch_timestamp_ms(ctx),
-    });
-
-    // 转移资金单元所有权
-    transfer::share_object(fund_unit);
-}
-
-/// 从资金单元转出资金
-public entry fun transfer_from_fund_unit<T>(
-    fund_unit: &mut FundUnit,
-    recipient: address,
-    amount: u64,
-    purpose_tag: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    // 检查资金单元当前状态
-    let current_time = tx_context::epoch_timestamp_ms(ctx);
-
-    // 验证时间锁
-    assert!(current_time >= fund_unit.release_time, ETimeNotReached);
-
-    // 验证金额
-    assert!(amount > 0 && amount <= fund_unit.amount, EInvalidAmount);
-
-    // 验证每笔限额
-    if (fund_unit.max_transfer > 0) {
-        assert!(amount <= fund_unit.max_transfer, EExceedsMaxTransfer);
-    };
-
-    // 验证发起者身份
-    let sender = tx_context::sender(ctx);
-    assert!(sender == fund_unit.current_owner, ENotCurrentOwner);
-
-    // 验证接收者白名单
-    if (!vector::is_empty(&fund_unit.white_list)) {
-        assert!(vector::contains(&fund_unit.white_list, &recipient), ERecipientNotAllowed);
-    };
-
-    // 验证接收者不在黑名单
-    if (!vector::is_empty(&fund_unit.black_list)) {
-        assert!(!vector::contains(&fund_unit.black_list, &recipient), ERecipientBlacklisted);
-    };
-
-    // 验证零知识证明 (在实际实现中应该调用ZK验证器)
-    if (fund_unit.zk_proof_required) {};
-
-    // 更新资金单元状态
-    fund_unit.amount = fund_unit.amount - amount;
-
-    // 在真实实现中，这里应该从Treasury提取资金并转给接收方
-    // let coin = treasury::withdraw_from_fund_unit(treasury, object::id(fund_unit), amount, ctx);
-    // transfer::public_transfer(coin, recipient);
-
-    // 记录转账记录
-    let purpose_tag_option = if (vector::length(&purpose_tag) > 0) {
-        option::some(string::utf8(purpose_tag))
-    } else {
-        option::none()
-    };
-
-    let record = TransactionRecord {
-        timestamp: current_time,
-        recipient: if (fund_unit.privacy_level >= 2) {
-            option::none()
-        } else {
-            option::some(recipient)
-        },
-        amount: if (fund_unit.privacy_level == 1 || fund_unit.privacy_level == 3) {
-            option::none()
-        } else {
-            option::some(amount)
-        },
-        purpose_tag: purpose_tag_option,
-        transaction_digest: tx_context::digest(ctx),
-        zk_compliance_proof: option::none(),
-    };
-
-    vector::push_back(&mut fund_unit.usage_audit_trail, record);
-    fund_unit.last_update_time = current_time;
-
-    // 发出转账事件
-    if (fund_unit.privacy_level == 0) {
-        event::emit(FundUnitTransferEvent {
-            fund_unit_id: object::id(fund_unit),
-            from: sender,
-            to: recipient,
-            amount,
-            purpose_tag: purpose_tag_option,
-            timestamp: current_time,
-        });
-    } else {
-        // 仅发布隐私保护版本的事件
-        event::emit(FundUnitPrivateTransferEvent {
-            fund_unit_id: object::id(fund_unit),
-            transaction_digest: tx_context::digest(ctx),
-            timestamp: current_time,
-        });
-    };
-}
-
-/// 为资金单元添加动态属性
-public entry fun add_property_to_fund_unit<T: store>(
-    fund_unit: &mut FundUnit,
-    property_name: vector<u8>,
-    property_value: T,
-    ctx: &mut TxContext,
-) {
-    // 验证调用者权限
-    let sender = tx_context::sender(ctx);
-    assert!(
-        sender == fund_unit.original_owner || 
-            vector::contains(&fund_unit.authorized_signers, &sender),
-        EUnauthorizedModification,
+    let (treasury_cap_val, deny_cap_val, metadata_obj): (
+        TreasuryCap<USDH>,
+        DenyCapV2<USDH>,
+        CoinMetadata<USDH>,
+    ) = coin::create_regulated_currency_v2(
+        otw,
+        USDH_DECIMALS,
+        USDH_SYMBOL,
+        USDH_NAME,
+        USDH_DESCRIPTION,
+        some(icon_url_obj), // Use the created URL object
+        true, // is_member_governance set to true
+        ctx,
     );
 
-    // 获取动态字段容器ID
-    assert!(option::is_some(&fund_unit.meta_fields), EDynamicFieldsNotInitialized);
-
-    // 添加动态字段
-    let property_name_str = string::utf8(property_name);
-    dynamic_field::add(&mut fund_unit.id, property_name_str, property_value);
-
-    // 发出事件
-    event::emit(FundUnitPropertyAddEvent {
-        fund_unit_id: object::id(fund_unit),
-        property_name: string::utf8(property_name),
-        property_type: type_name::get<T>(),
-        timestamp: tx_context::epoch_timestamp_ms(ctx),
-    });
-}
-
-/// 创建多签授权请求
-public entry fun create_authorization(
-    fund_unit: &mut FundUnit,
-    recipient: address,
-    amount: u64,
-    purpose_tag: vector<u8>,
-    expiration_time: u64,
-    ctx: &mut TxContext,
-) {
-    // 验证调用者身份
     let sender = tx_context::sender(ctx);
-    assert!(
-        sender == fund_unit.current_owner || 
-            vector::contains(&fund_unit.authorized_signers, &sender),
-        ENotCurrentOwner,
-    );
+    // Get the ID before metadata_obj is moved by public_freeze_object
+    let coin_metadata_id_val = object::id(&metadata_obj);
+    transfer::public_freeze_object(metadata_obj); // Freeze the metadata to make it immutable
 
-    // 验证金额
-    assert!(amount > 0 && amount <= fund_unit.amount, EInvalidAmount);
-
-    // 创建授权请求
-    let purpose_tag_option = if (vector::length(&purpose_tag) > 0) {
-        option::some(string::utf8(purpose_tag))
-    } else {
-        option::none()
-    };
-
-    let auth = Authorization {
+    let config = USDHConfig {
         id: object::new(ctx),
-        fund_unit_id: object::id(fund_unit),
-        transaction_id: vector::length(&fund_unit.usage_audit_trail) + 1,
-        recipient,
-        amount,
-        purpose_tag: purpose_tag_option,
-        authorized_by: vector[sender],
-        is_completed: false,
-        created_at: tx_context::epoch_timestamp_ms(ctx),
-        expires_at: expiration_time,
+        owner: sender,
+        treasury_cap: treasury_cap_val,
+        deny_cap: deny_cap_val,
+        coin_metadata_id: coin_metadata_id_val,
+        total_supply: 0, // Initial supply is 0, mint as needed
+        paused: false,
     };
 
-    // 发出授权创建事件
-    event::emit(AuthorizationCreatedEvent {
-        authorization_id: object::id(&auth),
-        fund_unit_id: object::id(fund_unit),
-        creator: sender,
-        recipient,
-        amount,
-        timestamp: tx_context::epoch_timestamp_ms(ctx),
-    });
-
-    // 分享授权对象
-    transfer::share_object(auth);
+    transfer::share_object(config);
+    transfer::transfer(AdminCap { id: object::new(ctx) }, sender);
 }
 
-/// 审批多签授权
-public entry fun approve_authorization(
-    fund_unit: &mut FundUnit,
-    auth: &mut Authorization,
+/// Mints new USDH coins. Requires AdminCap.
+public entry fun mint(
+    admin_cap: &AdminCap,
+    config: &mut USDHConfig,
+    amount: u64,
+    recipient: address,
     ctx: &mut TxContext,
 ) {
-    // 验证授权是否有效
-    assert!(!auth.is_completed, EAlreadyComplete);
-    assert!(auth.fund_unit_id == object::id(fund_unit), EInvalidOperation);
-    assert!(tx_context::epoch_timestamp_ms(ctx) <= auth.expires_at, EAuthorizationExpired);
+    assert!(tx_context::sender(ctx) == config.owner, ENotAdmin); // Check if caller is owner via AdminCap presence
+    assert!(!config.paused, ELocalPaused);
 
-    // 验证审批者身份
+    let new_coin = coin::mint(&mut config.treasury_cap, amount, ctx);
+    transfer::public_transfer(new_coin, recipient);
+    config.total_supply = config.total_supply + amount;
+
+    event::emit(MintEvent {
+        amount_minted: amount,
+        recipient: recipient,
+        new_total_supply: config.total_supply,
+    });
+}
+
+/// Burns USDH coins. Requires AdminCap.
+public entry fun burn(
+    admin_cap: &AdminCap,
+    config: &mut USDHConfig,
+    coin_to_burn: Coin<USDH>,
+    _ctx: &mut TxContext, // Context might be used for events or future logic
+) {
+    assert!(!config.paused, ELocalPaused);
+
+    let amount_to_burn = coin::value(&coin_to_burn);
+    assert!(config.total_supply >= amount_to_burn, EBurnAmountExceedsSupply);
+
+    coin::burn(&mut config.treasury_cap, coin_to_burn);
+    config.total_supply = config.total_supply - amount_to_burn;
+
+    event::emit(BurnEvent {
+        amount_burned: amount_to_burn,
+        new_total_supply: config.total_supply,
+    });
+}
+
+/// Adds an address to the deny list for USDH. Requires AdminCap.
+public entry fun add_to_deny_list(
+    admin_cap: &AdminCap,
+    config: &mut USDHConfig, // Changed to &mut to allow mutable borrow of deny_cap
+    deny_list_shared_object: &mut DenyList,
+    address_to_deny: address,
+    ctx: &mut TxContext, // Added ctx as it is required by deny_list_v2_add
+) {
+    assert!(tx_context::sender(ctx) == config.owner, ENotAdmin);
+    coin::deny_list_v2_add<USDH>(
+        deny_list_shared_object,
+        &mut config.deny_cap,
+        address_to_deny,
+        ctx,
+    );
+}
+
+/// Removes an address from the deny list for USDH. Requires AdminCap.
+public entry fun remove_from_deny_list(
+    admin_cap: &AdminCap,
+    config: &mut USDHConfig, // Changed to &mut to allow mutable borrow of deny_cap
+    deny_list_shared_object: &mut DenyList,
+    address_to_remove: address,
+    ctx: &mut TxContext, // Added ctx as it is required by deny_list_v2_remove
+) {
+    assert!(tx_context::sender(ctx) == config.owner, ENotAdmin);
+    coin::deny_list_v2_remove<USDH>(
+        deny_list_shared_object,
+        &mut config.deny_cap,
+        address_to_remove,
+        ctx,
+    );
+}
+
+/// Pauses minting and burning operations. Requires AdminCap.
+public entry fun local_pause_operations(
+    admin_cap: &AdminCap,
+    config: &mut USDHConfig,
+    _ctx: &mut TxContext,
+) {
+    assert!(tx_context::sender(_ctx) == config.owner, ENotAdmin);
+    assert!(!config.paused, EAlreadyLocalPaused);
+    config.paused = true;
+    event::emit(LocalPauseStateChanged { paused: true });
+}
+
+/// Unpauses minting and burning operations. Requires AdminCap.
+public entry fun local_unpause_operations(
+    admin_cap: &AdminCap,
+    config: &mut USDHConfig,
+    _ctx: &mut TxContext,
+) {
+    assert!(tx_context::sender(_ctx) == config.owner, ENotAdmin);
+    assert!(config.paused, ENotLocalPaused);
+    config.paused = false;
+    event::emit(LocalPauseStateChanged { paused: false });
+}
+
+/// Enables global pause for the USDH. Requires AdminCap.
+public entry fun global_pause_enable(
+    admin_cap: &AdminCap,
+    config: &mut USDHConfig,
+    deny_list_shared_object: &mut DenyList,
+    ctx: &mut TxContext,
+) {
+    assert!(tx_context::sender(ctx) == config.owner, ENotAdmin);
+    coin::deny_list_v2_enable_global_pause<USDH>(
+        deny_list_shared_object,
+        &mut config.deny_cap,
+        ctx,
+    );
+    event::emit(GlobalPauseStateChanged { enabled: true });
+}
+
+/// Disables global pause for the USDH. Requires AdminCap.
+public entry fun global_pause_disable(
+    admin_cap: &AdminCap,
+    config: &mut USDHConfig,
+    deny_list_shared_object: &mut DenyList,
+    ctx: &mut TxContext,
+) {
+    assert!(tx_context::sender(ctx) == config.owner, ENotAdmin);
+    coin::deny_list_v2_disable_global_pause<USDH>(
+        deny_list_shared_object,
+        &mut config.deny_cap,
+        ctx,
+    );
+    event::emit(GlobalPauseStateChanged { enabled: false });
+}
+
+/// Transfers ownership of the USDHConfig and implicitly the AdminCap's authority.
+public entry fun transfer_ownership(
+    admin_cap: &AdminCap,
+    new_owner_admin_cap: AdminCap,
+    new_owner_address: address,
+    config: &mut USDHConfig,
+    ctx: &mut TxContext,
+) {
     let sender = tx_context::sender(ctx);
-    assert!(vector::contains(&fund_unit.authorized_signers, &sender), EUnauthorizedModification);
-    assert!(!vector::contains(&auth.authorized_by, &sender), EAlreadyAuthorized);
-
-    // 添加到已授权列表
-    vector::push_back(&mut auth.authorized_by, sender);
-
-    // 发出授权审批事件
-    event::emit(AuthorizationApprovedEvent {
-        authorization_id: object::id(auth),
-        fund_unit_id: object::id(fund_unit),
-        approver: sender,
-        timestamp: tx_context::epoch_timestamp_ms(ctx),
+    assert!(sender == config.owner, ENotAdmin);
+    let old_owner = config.owner;
+    config.owner = new_owner_address;
+    transfer::transfer(new_owner_admin_cap, new_owner_address);
+    event::emit(OwnershipTransferred {
+        old_owner: old_owner,
+        new_owner: new_owner_address,
     });
-
-    // 检查是否达到多签阈值
-    if (vector::length(&auth.authorized_by) >= (fund_unit.quorum_threshold as u64)) {
-        // 达到阈值，执行转账
-        execute_authorized_transfer(fund_unit, auth, ctx);
-    };
+    // The old admin_cap (held by `sender`) is implicitly consumed/invalidated by transferring ownership.
+    // The sender should destroy or securely store their old AdminCap object.
+    // For this function, we only care about transferring the new one.
 }
 
-/// 执行已授权的转账（内部函数）
-fun execute_authorized_transfer(
-    fund_unit: &mut FundUnit,
-    auth: &mut Authorization,
-    ctx: &mut TxContext,
-) {
-    // 标记授权为已完成
-    auth.is_completed = true;
+// View Functions (Re-added)
 
-    // 更新资金单元状态
-    fund_unit.amount = fund_unit.amount - auth.amount;
-
-    // 在真实实现中，这里应该从Treasury提取资金并转给接收方
-    // let coin = treasury::withdraw_from_fund_unit(treasury, object::id(fund_unit), auth.amount, ctx);
-    // transfer::public_transfer(coin, auth.recipient);
-
-    // 记录转账记录
-    let record = TransactionRecord {
-        timestamp: tx_context::epoch_timestamp_ms(ctx),
-        recipient: if (fund_unit.privacy_level >= 2) {
-            option::none()
-        } else {
-            option::some(auth.recipient)
-        },
-        amount: if (fund_unit.privacy_level == 1 || fund_unit.privacy_level == 3) {
-            option::none()
-        } else {
-            option::some(auth.amount)
-        },
-        purpose_tag: auth.purpose_tag,
-        transaction_digest: tx_context::digest(ctx),
-        zk_compliance_proof: option::none(),
-    };
-
-    vector::push_back(&mut fund_unit.usage_audit_trail, record);
-    fund_unit.last_update_time = tx_context::epoch_timestamp_ms(ctx);
-
-    // 发出转账事件
-    if (fund_unit.privacy_level == 0) {
-        event::emit(FundUnitTransferEvent {
-            fund_unit_id: object::id(fund_unit),
-            from: fund_unit.current_owner,
-            to: auth.recipient,
-            amount: auth.amount,
-            purpose_tag: auth.purpose_tag,
-            timestamp: tx_context::epoch_timestamp_ms(ctx),
-        });
-    } else {
-        // 仅发布隐私保护版本的事件
-        event::emit(FundUnitPrivateTransferEvent {
-            fund_unit_id: object::id(fund_unit),
-            transaction_digest: tx_context::digest(ctx),
-            timestamp: tx_context::epoch_timestamp_ms(ctx),
-        });
-    };
+public fun total_supply(config: &USDHConfig): u64 {
+    config.total_supply
 }
 
-// 用于条件付款的功能可以在真实实现中添加
-// ...
+public fun coin_metadata_id(config: &USDHConfig): ID {
+    config.coin_metadata_id
+}
 
-// 检查日期限额的功能在真实实现中添加
-// ...
+public fun is_local_paused(config: &USDHConfig): bool {
+    config.paused
+}
 
-// 零知识证明验证功能在真实实现中添加
-// ...
+public fun owner(config: &USDHConfig): address {
+    config.owner
+}
