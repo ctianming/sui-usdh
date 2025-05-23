@@ -515,7 +515,9 @@ export default function MainPage() {
     return (
         <main className={`min-h-screen transition-opacity duration-1000 ${visible ? 'opacity-100' : 'opacity-0'}`} ref={sectionsRef}>
             {/* Digital Rain Background */}
-            <DigitalRain />
+            <div className="fixed inset-0 z-0 pointer-events-none">
+                <DigitalRain />
+            </div>
 
             <Navbar />
 

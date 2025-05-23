@@ -2,78 +2,65 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { ConnectButton } from './ConnectButton';
+import { HomeIcon, ArrowUturnLeftIcon } from '@heroicons/react/24/outline';
 
 export default function Navbar() {
     const pathname = usePathname();
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [scrolled, setScrolled] = useState(false);
-    const [walletConnected, setWalletConnected] = useState(false);
     const [activeLink, setActiveLink] = useState('');
+
+    const isDashboardPage = pathname === '/dashboard';
+    const isMainPage = pathname === '/main';
 
     // Handle scroll effect for navbar
     useEffect(() => {
         const handleScroll = () => {
             const offset = window.scrollY;
-            if (offset > 30) {
-                setScrolled(true);
-            } else {
-                setScrolled(false);
-            }
+            setScrolled(offset > 30);
         };
-
         window.addEventListener('scroll', handleScroll);
-        return () => {
-            window.removeEventListener('scroll', handleScroll);
-        };
+        return () => window.removeEventListener('scroll', handleScroll);
     }, []);
 
-    // Handle intersection observer for sections
+    // Handle intersection observer for sections (only on main page)
     useEffect(() => {
-        const sections = document.querySelectorAll('section[id]');
+        if (isMainPage) {
+            const sections = document.querySelectorAll('section[id]');
+            const observerOptions = { root: null, rootMargin: '0px', threshold: 0.7 };
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) setActiveLink(entry.target.id);
+                });
+            }, observerOptions);
+            sections.forEach(section => observer.observe(section));
+            return () => sections.forEach(section => observer.unobserve(section));
+        }
+    }, [isMainPage]);
 
-        const observerOptions = {
-            root: null,
-            rootMargin: '0px',
-            threshold: 0.7,
-        };
+    const toggleMenu = () => setIsMenuOpen(!isMenuOpen);
 
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    setActiveLink(entry.target.id);
-                }
-            });
-        }, observerOptions);
+    const navLinkClasses = (sectionId: string) =>
+        `nav-link text-sm font-medium transition-all duration-200 relative ${activeLink === sectionId
+            ? 'text-white'
+            : 'text-gray-300 hover:text-white'}`;
 
-        sections.forEach(section => {
-            observer.observe(section);
-        });
+    const navLinkSpanClasses = (sectionId: string) =>
+        `absolute bottom-0 left-0 h-0.5 bg-gradient-to-r from-blue-500/70 to-transparent transition-all duration-300 ${activeLink === sectionId ? 'w-full' : 'w-0'}`;
 
-        return () => {
-            sections.forEach(section => {
-                observer.unobserve(section);
-            });
-        };
-    }, []);
-
-    const toggleMenu = () => {
-        setIsMenuOpen(!isMenuOpen);
-    };
-
-    // Simulate wallet connection
-    const handleWalletConnect = () => {
-        // In a real implementation, this would connect to the actual wallet
-        setWalletConnected(!walletConnected);
-    };
+    const mobileNavLinkClasses = (sectionId: string) =>
+        `block px-3 py-2.5 text-base font-medium rounded-md transition-colors duration-200 ${activeLink === sectionId
+            ? 'text-white bg-blue-500/10'
+            : 'text-gray-300 hover:text-white hover:bg-blue-500/10'}`;
 
     return (
-        <nav className={`fixed top-0 w-full z-50 transition-all duration-300 
-            ${scrolled
+        <nav className={`fixed top-0 w-full z-[100] transition-all duration-300 
+            ${scrolled || isDashboardPage
                 ? 'glass-dark shadow-lg py-2 border-b border-[rgba(var(--color-primary),0.15)]'
-                : 'bg-transparent py-4'
+                : isMainPage ? 'bg-transparent py-4' : 'glass-dark shadow-lg py-2 border-b border-[rgba(var(--color-primary),0.15)]' // Ensure other pages also have a bg if not scrolled
             }`}>
-            {/* Subtle glowing line accent under the navbar when scrolled */}
-            {scrolled && (
+            {(scrolled || isDashboardPage || !isMainPage) && (
                 <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-blue-500/50 to-transparent"></div>
             )}
 
@@ -86,93 +73,73 @@ export default function Navbar() {
                                 <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-gradient-to-r from-blue-500/70 to-transparent transition-all duration-300 group-hover:w-full"></span>
                             </Link>
                         </div>
-                        <div className="hidden md:block ml-12">
-                            <div className="flex items-center space-x-10">
-                                <a
-                                    href="#about"
-                                    className={`nav-link text-sm font-medium transition-all duration-200 relative ${activeLink === 'about'
-                                        ? 'text-white'
-                                        : 'text-gray-300 hover:text-white'
-                                        }`}
-                                >
-                                    About
-                                    <span className={`absolute bottom-0 left-0 h-0.5 bg-gradient-to-r from-blue-500/70 to-transparent transition-all duration-300 ${activeLink === 'about' ? 'w-full' : 'w-0'
-                                        }`}></span>
-                                </a>
-                                <a
-                                    href="#features"
-                                    className={`nav-link text-sm font-medium transition-all duration-200 relative ${activeLink === 'features'
-                                        ? 'text-white'
-                                        : 'text-gray-300 hover:text-white'
-                                        }`}
-                                >
-                                    Features
-                                    <span className={`absolute bottom-0 left-0 h-0.5 bg-gradient-to-r from-blue-500/70 to-transparent transition-all duration-300 ${activeLink === 'features' ? 'w-full' : 'w-0'
-                                        }`}></span>
-                                </a>
-                                <a
-                                    href="#roadmap"
-                                    className={`nav-link text-sm font-medium transition-all duration-200 relative ${activeLink === 'roadmap'
-                                        ? 'text-white'
-                                        : 'text-gray-300 hover:text-white'
-                                        }`}
-                                >
-                                    Roadmap
-                                    <span className={`absolute bottom-0 left-0 h-0.5 bg-gradient-to-r from-blue-500/70 to-transparent transition-all duration-300 ${activeLink === 'roadmap' ? 'w-full' : 'w-0'
-                                        }`}></span>
-                                </a>
-                                <div className="relative group">
-                                    <button className="nav-link text-gray-300 hover:text-white text-sm font-medium flex items-center transition-all duration-200 relative">
-                                        Resources
-                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 ml-1 transition-transform duration-300 group-hover:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                        </svg>
-                                        <span className="absolute bottom-0 left-0 w-0 h-0.5 bg-gradient-to-r from-blue-500/70 to-transparent transition-all duration-300 group-hover:w-full"></span>
-                                    </button>
-                                    <div className="absolute left-0 mt-2 w-48 glass-dark rounded-md shadow-lg py-2 border border-blue-500/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-300 z-50 transform -translate-y-2 group-hover:translate-y-0">
-                                        <a href="#" className="block px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-blue-500/10 transition-colors duration-200">
-                                            Documentation
-                                        </a>
-                                        <a href="https://clearskys-organization-1.gitbook.io/usdh/" target="_blank" rel="noopener noreferrer" className="block px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-blue-500/10 transition-colors duration-200">
-                                            Whitepaper
-                                        </a>
-                                        <a href="#" className="block px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-blue-500/10 transition-colors duration-200">
-                                            GitHub
-                                        </a>
+                        {isMainPage && (
+                            <div className="hidden md:block ml-12">
+                                <div className="flex items-center space-x-10">
+                                    <a href="#about" className={navLinkClasses('about')}>
+                                        About
+                                        <span className={navLinkSpanClasses('about')}></span>
+                                    </a>
+                                    <a href="#features" className={navLinkClasses('features')}>
+                                        Features
+                                        <span className={navLinkSpanClasses('features')}></span>
+                                    </a>
+                                    <a href="#roadmap" className={navLinkClasses('roadmap')}>
+                                        Roadmap
+                                        <span className={navLinkSpanClasses('roadmap')}></span>
+                                    </a>
+                                    <div className="relative group">
+                                        <button className="nav-link text-gray-300 hover:text-white text-sm font-medium flex items-center transition-all duration-200 relative">
+                                            Resources
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 ml-1 transition-transform duration-300 group-hover:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                            </svg>
+                                            <span className="absolute bottom-0 left-0 w-0 h-0.5 bg-gradient-to-r from-blue-500/70 to-transparent transition-all duration-300 group-hover:w-full"></span>
+                                        </button>
+                                        <div className="absolute left-0 mt-2 w-48 glass-dark rounded-md shadow-lg py-2 border border-blue-500/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-300 z-50 transform -translate-y-2 group-hover:translate-y-0">
+                                            <a href="#" className="block px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-blue-500/10 transition-colors duration-200">
+                                                Documentation
+                                            </a>
+                                            <a href="https://clearskys-organization-1.gitbook.io/usdh/" target="_blank" rel="noopener noreferrer" className="block px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-blue-500/10 transition-colors duration-200">
+                                                Whitepaper
+                                            </a>
+                                            <a href="#" className="block px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-blue-500/10 transition-colors duration-200">
+                                                GitHub
+                                            </a>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                        </div>
+                        )}
                     </div>
-                    <div className="hidden md:flex items-center space-x-6">
-                        <a
-                            href="#"
-                            className="text-gray-300 hover:text-white text-sm font-medium transition-all duration-200 relative group"
-                        >
-                            Community
-                            <span className="absolute bottom-0 left-0 w-0 h-0.5 bg-gradient-to-r from-blue-500/70 to-transparent transition-all duration-300 group-hover:w-full"></span>
-                        </a>
-                        <button
-                            onClick={handleWalletConnect}
-                            className={`btn-primary text-sm px-5 py-2 flex items-center space-x-2 ${walletConnected ? 'border-breath' : 'shimmer'}`}
-                        >
-                            {walletConnected ? (
-                                <>
-                                    <span className="relative">
-                                        <span className="inline-block w-2 h-2 bg-green-500 rounded-full"></span>
-                                        <span className="absolute top-0 left-0 w-2 h-2 bg-green-500 rounded-full animate-ping opacity-75"></span>
-                                    </span>
-                                    <span>UXBR...8F2D</span>
-                                </>
-                            ) : (
-                                <span className="relative">
-                                    Connect Wallet
-                                    <span className="absolute -bottom-1 left-0 right-0 h-px bg-gradient-to-r from-transparent via-blue-400/50 to-transparent animate-shimmer"></span>
-                                </span>
-                            )}
-                        </button>
+
+                    <div className="flex items-center space-x-4">
+                        {isDashboardPage && (
+                            <Link
+                                href="/main"
+                                className="hidden md:inline-flex items-center text-sm text-gray-300 hover:text-white bg-gray-800/50 hover:bg-gray-700/50 px-3 py-2 rounded-md transition-colors"
+                                title="返回主页"
+                            >
+                                <ArrowUturnLeftIcon className="w-5 h-5" />
+                            </Link>
+                        )}
+                        {isMainPage && (
+                            <a
+                                href="#"
+                                className="hidden md:inline-flex text-gray-300 hover:text-white text-sm font-medium transition-all duration-200 relative group"
+                            >
+                                Community
+                                <span className="absolute bottom-0 left-0 w-0 h-0.5 bg-gradient-to-r from-blue-500/70 to-transparent transition-all duration-300 group-hover:w-full"></span>
+                            </a>
+                        )}
+                        {!isMainPage && (
+                            <div className="relative z-[101]">
+                                <ConnectButton />
+                            </div>
+                        )}
                     </div>
-                    <div className="-mr-2 flex md:hidden">
+
+                    <div className="-mr-2 flex md:hidden"> {/* Mobile Menu Button */}
                         <button
                             onClick={toggleMenu}
                             className="inline-flex items-center justify-center p-2 rounded-md text-gray-400 hover:text-white hover:bg-blue-500/10 focus:outline-none transition-colors duration-300"
@@ -189,7 +156,7 @@ export default function Navbar() {
                 </div>
             </div>
 
-            {/* Mobile menu with improved animation */}
+            {/* Mobile menu */}
             <div
                 className={`md:hidden absolute w-full transform transition-all duration-300 ease-in-out ${isMenuOpen
                     ? 'opacity-100 translate-y-0'
@@ -197,79 +164,63 @@ export default function Navbar() {
                     }`}
             >
                 <div className="px-2 pt-2 pb-3 space-y-1 sm:px-3 glass-dark border-b border-blue-500/10 shadow-lg">
-                    <a href="#about" className={`block px-3 py-2.5 text-base font-medium rounded-md transition-colors duration-200 ${activeLink === 'about'
-                        ? 'text-white bg-blue-500/10'
-                        : 'text-gray-300 hover:text-white hover:bg-blue-500/10'
-                        }`}>
-                        About
-                    </a>
-                    <a href="#features" className={`block px-3 py-2.5 text-base font-medium rounded-md transition-colors duration-200 ${activeLink === 'features'
-                        ? 'text-white bg-blue-500/10'
-                        : 'text-gray-300 hover:text-white hover:bg-blue-500/10'
-                        }`}>
-                        Features
-                    </a>
-                    <a href="#roadmap" className={`block px-3 py-2.5 text-base font-medium rounded-md transition-colors duration-200 ${activeLink === 'roadmap'
-                        ? 'text-white bg-blue-500/10'
-                        : 'text-gray-300 hover:text-white hover:bg-blue-500/10'
-                        }`}>
-                        Roadmap
-                    </a>
-                    <div className="px-3 py-2">
-                        <button
-                            className="flex w-full justify-between text-base font-medium text-gray-300 hover:text-white transition-colors duration-200"
-                            onClick={(e) => {
-                                e.preventDefault();
-                                const submenu = document.getElementById('mobile-resources-menu');
-                                if (submenu) {
-                                    submenu.classList.toggle('hidden');
-                                    // Toggle the rotation of the arrow
-                                    const arrow = e.currentTarget.querySelector('svg');
-                                    if (arrow) {
-                                        arrow.classList.toggle('rotate-180');
-                                    }
-                                }
-                            }}
-                        >
-                            Resources
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 transition-transform duration-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                            </svg>
-                        </button>
-                        <div id="mobile-resources-menu" className="hidden pl-4 pt-2 space-y-1 transition-all duration-300">
-                            <a href="#" className="block py-2 text-sm text-gray-400 hover:text-white transition-colors duration-200">
-                                Documentation
+                    {isDashboardPage && (
+                        <Link href="/main" className={`${mobileNavLinkClasses('main')} flex items-center`}>
+                            <ArrowUturnLeftIcon className="w-5 h-5 mr-2" />
+                            返回主页
+                        </Link>
+                    )}
+                    {isMainPage && (
+                        <>
+                            <a href="#about" className={mobileNavLinkClasses('about')}>
+                                About
                             </a>
-                            <a href="https://clearskys-organization-1.gitbook.io/usdh/" target="_blank" rel="noopener noreferrer" className="block py-2 text-sm text-gray-400 hover:text-white transition-colors duration-200">
-                                Whitepaper
+                            <a href="#features" className={mobileNavLinkClasses('features')}>
+                                Features
                             </a>
-                            <a href="#" className="block py-2 text-sm text-gray-400 hover:text-white transition-colors duration-200">
-                                GitHub
+                            <a href="#roadmap" className={mobileNavLinkClasses('roadmap')}>
+                                Roadmap
                             </a>
+                            <div className="px-3 py-2">
+                                <button
+                                    className="flex w-full justify-between text-base font-medium text-gray-300 hover:text-white transition-colors duration-200"
+                                    onClick={(e) => {
+                                        e.preventDefault();
+                                        const submenu = document.getElementById('mobile-resources-menu');
+                                        if (submenu) submenu.classList.toggle('hidden');
+                                        const arrow = e.currentTarget.querySelector('svg');
+                                        if (arrow) arrow.classList.toggle('rotate-180');
+                                    }}
+                                >
+                                    Resources
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 transition-transform duration-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                    </svg>
+                                </button>
+                                <div id="mobile-resources-menu" className="hidden pl-4 pt-2 space-y-1 transition-all duration-300">
+                                    <a href="#" className="block py-2 text-sm text-gray-400 hover:text-white transition-colors duration-200">
+                                        Documentation
+                                    </a>
+                                    <a href="https://clearskys-organization-1.gitbook.io/usdh/" target="_blank" rel="noopener noreferrer" className="block py-2 text-sm text-gray-400 hover:text-white transition-colors duration-200">
+                                        Whitepaper
+                                    </a>
+                                    <a href="#" className="block py-2 text-sm text-gray-400 hover:text-white transition-colors duration-200">
+                                        GitHub
+                                    </a>
+                                </div>
+                            </div>
+                            <a href="#" className={`${mobileNavLinkClasses('community')} `}>
+                                Community
+                            </a>
+                        </>
+                    )}
+                    {!isMainPage && (
+                        <div className="mt-4 px-3">
+                            <div className="relative z-[101]">
+                                <ConnectButton />
+                            </div>
                         </div>
-                    </div>
-                    <a href="#" className="block px-3 py-2.5 text-base font-medium text-gray-300 hover:text-white hover:bg-blue-500/10 rounded-md transition-colors duration-200">
-                        Community
-                    </a>
-                    <button
-                        onClick={handleWalletConnect}
-                        className={`w-full mt-4 btn-primary text-sm py-2.5 flex items-center justify-center space-x-2 ${walletConnected ? 'border-breath' : 'shimmer'}`}
-                    >
-                        {walletConnected ? (
-                            <>
-                                <span className="relative">
-                                    <span className="inline-block w-2 h-2 bg-green-500 rounded-full"></span>
-                                    <span className="absolute top-0 left-0 w-2 h-2 bg-green-500 rounded-full animate-ping opacity-75"></span>
-                                </span>
-                                <span>UXBR...8F2D</span>
-                            </>
-                        ) : (
-                            <span className="relative">
-                                Connect Wallet
-                                <span className="absolute -bottom-1 left-0 right-0 h-px bg-gradient-to-r from-transparent via-blue-400/50 to-transparent animate-shimmer"></span>
-                            </span>
-                        )}
-                    </button>
+                    )}
                 </div>
             </div>
         </nav>
